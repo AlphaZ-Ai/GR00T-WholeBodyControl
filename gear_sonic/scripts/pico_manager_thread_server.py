@@ -85,6 +85,12 @@ except ImportError:
     G1GripperInverseKinematicsSolver = None
 
 try:
+    from gear_sonic.utils.teleop.inspire_hand_controller import InspireFTPController
+except ImportError:
+    print("Warning: InspireFTPController not available (inspire_sdkpy or unitree_sdk2py may not be installed).")
+    InspireFTPController = None
+
+try:
     from gear_sonic.utils.teleop.vis.vr3pt_pose_visualizer import VR3PtPoseVisualizer
 except ImportError:
     print("Warning: VR3PtPoseVisualizer not available (pyvista may not be installed).")
@@ -1814,6 +1820,7 @@ def run_pico_manager(
     with_g1_robot: bool = True,
     enable_waist_tracking: bool = False,
     enable_smpl_vis: bool = False,
+    inspire_hand: bool = False,
 ):
     """
     Manager: creates shared PUB socket and runs pose/planner streamers based on current mode.
@@ -1831,6 +1838,29 @@ def run_pico_manager(
     while not xrt.is_body_data_available():
         print("waiting for body data...")
         time.sleep(1)
+
+    # -- Inspire FTP hand controller (optional) --------------------------------
+    inspire_ctrl = None
+    inspire_left_gripper_val  = None
+    inspire_right_gripper_val = None
+    inspire_pause_flag        = None
+    if inspire_hand:
+        if InspireFTPController is None:
+            print(
+                "[Manager] WARNING: --inspire-hand requested but InspireFTPController "
+                "could not be imported. Hand control disabled."
+            )
+        else:
+            from multiprocessing import Value as _Value
+            inspire_left_gripper_val  = _Value('d', 0.0)
+            inspire_right_gripper_val = _Value('d', 0.0)
+            inspire_pause_flag        = _Value('b', True)  # start paused until policy runs
+            inspire_ctrl = InspireFTPController(
+                left_gripper_value=inspire_left_gripper_val,
+                right_gripper_value=inspire_right_gripper_val,
+                hand_pause_flag=inspire_pause_flag,
+            )
+            print("[Manager] Inspire FTP hand controller started.")
 
     context = zmq.Context()
     socket = context.socket(zmq.PUB)
@@ -1907,7 +1937,14 @@ def run_pico_manager(
             # Poll Pico controller for buttons/axes
             a_pressed, b_pressed, x_pressed, y_pressed = get_abxy_buttons()
 
-            left_menu_button, _, _, _, _ = get_controller_inputs()
+            left_menu_button, _left_trig, _right_trig, _, _ = get_controller_inputs()
+
+            # Feed trigger values to Inspire hand controller (0=open, 1=closed)
+            if inspire_left_gripper_val is not None:
+                with inspire_left_gripper_val.get_lock():
+                    inspire_left_gripper_val.value = float(_left_trig)
+                with inspire_right_gripper_val.get_lock():
+                    inspire_right_gripper_val.value = float(_right_trig)
 
             left_axis_click, _ = get_axis_clicks()
 
@@ -2023,6 +2060,9 @@ def run_pico_manager(
             if new_mode != current_mode:
                 if new_mode == StreamMode.OFF:
                     socket.send(build_command_message(start=False, stop=True, planner=True))
+                    if inspire_pause_flag is not None:
+                        with inspire_pause_flag.get_lock():
+                            inspire_pause_flag.value = True
                     exit()
                 elif (
                     new_mode == StreamMode.PLANNER
@@ -2030,8 +2070,14 @@ def run_pico_manager(
                     or new_mode == StreamMode.PLANNER_VR_3PT
                 ):
                     socket.send(build_command_message(start=True, stop=False, planner=True))
+                    if inspire_pause_flag is not None:
+                        with inspire_pause_flag.get_lock():
+                            inspire_pause_flag.value = False
                 elif new_mode == StreamMode.POSE:
                     socket.send(build_command_message(start=True, stop=False, planner=False))
+                    if inspire_pause_flag is not None:
+                        with inspire_pause_flag.get_lock():
+                            inspire_pause_flag.value = False
 
                 print(f"[Manager] StreamMode switch: {current_mode.name} -> {new_mode.name}")
                 current_mode = new_mode
@@ -2136,6 +2182,12 @@ if __name__ == "__main__":
         action="store_true",
         help="Enable SMPL body joint visualization (24 joint spheres) in the VR3pt viewer",
     )
+    parser.add_argument(
+        "--inspire-hand",
+        action="store_true",
+        dest="inspire_hand",
+        help="Enable Inspire FTP dexterous hand control (trigger-based open/close via DDS)",
+    )
     args = parser.parse_args()
 
     # Standalone VR3Pt test modes (exit after finishing)
@@ -2176,6 +2228,7 @@ if __name__ == "__main__":
             with_g1_robot=with_g1_robot,
             enable_waist_tracking=args.waist_tracking,
             enable_smpl_vis=args.vis_smpl,
+            inspire_hand=args.inspire_hand,
         )
     else:
         # Run legacy single-thread pose streaming

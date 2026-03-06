@@ -39,6 +39,7 @@ class G1GearWbcPolicy(Policy):
         self.obs_history = collections.deque(maxlen=self.config["obs_history_len"])
         self.obs_buffer = np.zeros(self.config["num_obs"], dtype=np.float32)
         self.counter = 0
+        self._smoothed_vy = 0.0  # EMA-smoothed lateral velocity fed to policy
 
         # Initialize state variables
         self.use_policy_action = False
@@ -115,9 +116,15 @@ class G1GearWbcPolicy(Policy):
         # Calculate single observation dimension
         single_obs_dim = 86  # 3 + 1 + 3 + 3 + 3 + n_joints + n_joints + 15, n_joints = 29
 
+        # Smooth lateral velocity (vy) to prevent abrupt gait changes from causing trips
+        _lateral_smooth = 0.35  # EMA factor: lower = smoother but slower response
+        self._smoothed_vy += _lateral_smooth * (self.cmd[1] - self._smoothed_vy)
+        smoothed_cmd = self.cmd.copy()
+        smoothed_cmd[1] = self._smoothed_vy
+
         # Create single observation
         single_obs = np.zeros(single_obs_dim, dtype=np.float32)
-        single_obs[0:3] = self.cmd[:3] * self.config["cmd_scale"]
+        single_obs[0:3] = smoothed_cmd[:3] * self.config["cmd_scale"]
         single_obs[3:4] = np.array([self.height_cmd])
         single_obs[4:7] = np.array([self.roll_cmd, self.pitch_cmd, self.yaw_cmd])
         single_obs[7:10] = omega_scaled
@@ -210,7 +217,8 @@ class G1GearWbcPolicy(Policy):
             )
 
         if interpolated_navigate_cmd is not None and self.use_teleop_policy_cmd:
-            self.cmd = interpolated_navigate_cmd
+            self.cmd = interpolated_navigate_cmd.copy()
+            self.cmd[1] = np.clip(self.cmd[1], -0.25, 0.25)
 
         if torso_orientation_rpy is not None and self.use_teleop_policy_cmd:
             self.roll_cmd = torso_orientation_rpy[0]
@@ -246,17 +254,17 @@ class G1GearWbcPolicy(Policy):
         elif key == "o":
             self.use_policy_action = False
         elif key == "w":
-            self.cmd[0] += 0.2
+            self.cmd[0] += 0.1
         elif key == "s":
-            self.cmd[0] -= 0.2
+            self.cmd[0] -= 0.1
         elif key == "a":
-            self.cmd[1] += 0.2
+            self.cmd[1] = min(self.cmd[1] + 0.05, 0.25)
         elif key == "d":
-            self.cmd[1] -= 0.2
+            self.cmd[1] = max(self.cmd[1] - 0.05, -0.25)
         elif key == "q":
-            self.cmd[2] += 0.2
+            self.cmd[2] += 0.15
         elif key == "e":
-            self.cmd[2] -= 0.2
+            self.cmd[2] -= 0.15
         elif key == "z":
             self.cmd[0] = 0.0
             self.cmd[1] = 0.0
