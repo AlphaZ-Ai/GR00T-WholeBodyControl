@@ -135,6 +135,7 @@
 
 // Dex3 hands
 #include "../include/dex3_hands.hpp"
+#include "../include/dex1_hands.hpp"
 
 // Error monitor
 #include "../include/error_monitor.hpp"
@@ -283,6 +284,8 @@ class G1Deploy {
     
     // Dex3 hands manager
     Dex3Hands dex3_hands_;
+    Dex1Hands dex1_hands_;
+    std::string hand_type_ = "dex3";
 
     // Motor error monitor (tracks fault state transitions)
     ErrorMonitor error_monitor_;
@@ -2180,7 +2183,9 @@ class G1Deploy {
       bool enable_motion_recording = false,
       std::array<double, 3> initial_compliance = {0.05, 0.05, 0.0},
       double initial_max_close_ratio = 1.0,
-      MotorGainScaleConfig motor_gain_scales = {})
+      MotorGainScaleConfig motor_gain_scales = {},
+      std::string hand_type = "dex3",
+      bool dex1_swap_sides = false)
       : time_(0.0),
         publish_dt_(0.002),
         control_dt_(0.02),
@@ -2218,7 +2223,11 @@ class G1Deploy {
       ChannelFactory::Instance()->Init(0, networkInterface);
 
       // Initialize Dex3 hands (ChannelFactory already initialized above)
-      dex3_hands_.initialize("");
+      hand_type_ = hand_type;
+      if (hand_type_ == "dex3") dex3_hands_.initialize("");
+      else if (hand_type_ == "dex1" || hand_type_ == "dex1-internal")
+        dex1_hands_.initialize(hand_type_ == "dex1-internal", dex1_swap_sides);
+      std::cout << "[INFO] Hand hardware: " << hand_type_ << std::endl;
 
       audio_thread_ = std::make_unique<AudioThread>();
 
@@ -2457,6 +2466,7 @@ class G1Deploy {
 
       // Prepare robot configuration for data collection (after all initialization is complete)
       std::map<std::string, std::variant<std::string, int, double, bool>> robot_config;
+      robot_config["hand_type"] = hand_type_;
       robot_config["model_path"] = model_path;
       robot_config["reference_motion_path"] = motion_data_path;
       robot_config["planner_path"] = planner_path.empty() ? "none" : planner_path;
@@ -2670,6 +2680,7 @@ class G1Deploy {
       }
 
       low_state_buffer_.SetData(low_state);
+      dex1_hands_.updateInternal(low_state);
 
       // update mode machine
       if (mode_machine_ != low_state.mode_machine()) {
@@ -2707,12 +2718,14 @@ class G1Deploy {
           dds_low_command.motor_cmd().at(i).kd() = mc->kd.at(i);
         }
 
+        dex1_hands_.applyInternal(dds_low_command);
         dds_low_command.crc() = Crc32Core((uint32_t*)&dds_low_command, (sizeof(dds_low_command) >> 2) - 1);
         lowcmd_publisher_->Write(dds_low_command);
       }
 
       // Publish Dex3 hand commands at the same publish cadence
-      dex3_hands_.writeOnce();
+      if (hand_type_ == "dex3") dex3_hands_.writeOnce();
+      else if (hand_type_ == "dex1") dex1_hands_.writeOnce();
     }
 
     /// Gracefully stop all threads and send a damping-only command.
@@ -2731,6 +2744,7 @@ class G1Deploy {
           planner_thread_ptr_.reset();
         }
       }
+      dex1_hands_.stop();
       CreateDampingCommand();
       LowCommandWriter();
       std::cout << "Stop" << std::endl;
@@ -2781,12 +2795,16 @@ class G1Deploy {
           motor_command_tmp.q_target.at(i) =
               static_cast<float>(current_pos * (1.0 - ratio) + default_angles[i] * ratio);
         }
-        dex3_hands_.close(true);
-        dex3_hands_.close(false);
+        if (hand_type_ == "dex3") {
+          dex3_hands_.close(true);
+          dex3_hands_.close(false);
+        }
       } else {
         program_state_ = ProgramState::WAIT_FOR_CONTROL;
-        dex3_hands_.open(true);
-        dex3_hands_.open(false);
+        if (hand_type_ == "dex3") {
+          dex3_hands_.open(true);
+          dex3_hands_.open(false);
+        }
         std::cout << "Init Done" << std::endl;
       }
       motor_command_buffer_.SetData(motor_command_tmp);
@@ -2953,6 +2971,14 @@ class G1Deploy {
           right_hand_q[i] = right_hand_state_ptr->motor_state()[i].q();
           right_hand_dq[i] = right_hand_state_ptr->motor_state()[i].dq();
         }
+      }
+
+      if (hand_type_ == "dex1" || hand_type_ == "dex1-internal") {
+        const auto left = dex1_hands_.state(0), right = dex1_hands_.state(1);
+        left_hand_q[0] = left[0]; left_hand_dq[0] = left[1];
+        right_hand_q[0] = right[0]; right_hand_dq[0] = right[1];
+        last_left_hand_action.fill(0); last_right_hand_action.fill(0);
+        last_left_hand_action[0] = left[2]; last_right_hand_action[0] = right[2];
       }
 
       // Log robot state for analysis and debugging
@@ -3988,8 +4014,14 @@ class G1Deploy {
           dex3_hands_.SetMaxCloseRatio(input_interface_->GetMaxCloseRatio());
           
           // set hand poses (use buffered data for consistency)
-          dex3_hands_.setAllJointsCommand(true, left_hand_joint_buffer_);
-          dex3_hands_.setAllJointsCommand(false, right_hand_joint_buffer_);
+          if (hand_type_ == "dex3") {
+            dex3_hands_.setAllJointsCommand(true, left_hand_joint_buffer_);
+            dex3_hands_.setAllJointsCommand(false, right_hand_joint_buffer_);
+          } else if (hand_type_ == "dex1" || hand_type_ == "dex1-internal") {
+            dex1_hands_.setTargets(left_hand_joint_buffer_, has_left_hand_data_,
+                                  right_hand_joint_buffer_, has_right_hand_data_,
+                                  input_interface_->GetMaxCloseRatio());
+          }
           
           // Update last hand actions for logging (use buffered data)
           for (int i = 0; i < 7; ++i) {
@@ -4190,6 +4222,8 @@ int main(int argc, char const* argv[]) {
     std::cout << "  --max-close-ratio <value>: set initial hand max close ratio (0.2-1.0; default: 1.0 = full closure)" << std::endl;
     std::cout << "                             0.2 = limited (80% open), 1.0 = full closure allowed" << std::endl;
     std::cout << "                             Keyboard controls: x/c = +/- 0.1 (always available)" << std::endl;
+    std::cout << "  --hand-type <dex3|dex1|dex1-internal|none>: hand hardware (default: dex3)" << std::endl;
+    std::cout << "  --dex1-swap-sides: the Dex1 service/motor named 'left' is the physical RIGHT gripper (and vice versa)" << std::endl;
     std::cout << "\nExamples:" << std::endl;
     std::cout << "  " << argv[0] << " enp5s0 policy/single_frame/model.onnx reference/bones_072925_test/ --planner-file policy/planner.onnx --obs-config policy/single_frame/observation_config.yaml --disable-crc-check" << std::endl;
     std::cout << "  " << argv[0] << " enp5s0 policy/token/model.onnx reference/bones_072925_test/ --obs-config policy/token/observation_config.yaml --encoder-file policy/token/encoder.onnx" << std::endl;
@@ -4234,8 +4268,19 @@ int main(int argc, char const* argv[]) {
   std::array<double, 3> initial_compliance = {0.5, 0.5, 0.0}; // initial compliance is 0.5 for both hands (keyboard controllable)
   double initial_max_close_ratio = 1.0; // default allows full closure, use --max-close-ratio to limit
   MotorGainScaleConfig motor_gain_scales;
+  std::string handType = "dex3";
+  bool dex1SwapSides = false;
   for (int i = 4; i < argc; i++) {
-    if (std::string(argv[i]) == "--disable-crc-check") {
+    if (std::string(argv[i]) == "--dex1-swap-sides") {
+      dex1SwapSides = true;
+    } else if (std::string(argv[i]) == "--hand-type") {
+      if (i + 1 >= argc) { std::cerr << "--hand-type requires a value" << std::endl; return 1; }
+      handType = argv[++i];
+      if (handType != "dex3" && handType != "dex1" && handType != "dex1-internal" && handType != "none") {
+        std::cerr << "--hand-type must be dex3, dex1, dex1-internal or none" << std::endl;
+        return 1;
+      }
+    } else if (std::string(argv[i]) == "--disable-crc-check") {
       disableCrcCheck = true;
       std::cout << "[INFO] CRC checking disabled for MuJoCo simulation" << std::endl;
     } else if (std::string(argv[i]) == "--obs-config") {
@@ -4504,7 +4549,9 @@ int main(int argc, char const* argv[]) {
     enableMotionRecording,
     initial_compliance,
     initial_max_close_ratio,
-    motor_gain_scales
+    motor_gain_scales,
+    handType,
+    dex1SwapSides
   );
   std::cout << "[DEBUG] G1Deploy object created successfully!" << std::endl;
   

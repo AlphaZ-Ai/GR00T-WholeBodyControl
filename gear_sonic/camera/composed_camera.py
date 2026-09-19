@@ -11,7 +11,7 @@ Usage (on robot)::
         --ego-view-device-id 18443010E1ABC12300 \\
         --port 5555
 
-Supported camera types: ``oak``, ``oak_mono``, ``realsense``,
+Supported camera types: ``oak``, ``oak_mono``, ``realsense``, ``zed``,
 ``usb``, or a path to an ``.mp4`` file for replay testing.
 
 Run ``python -m gear_sonic.camera.composed_camera --help`` for all options.
@@ -56,7 +56,7 @@ class ComposedCameraConfig:
     """Camera type for ego view: oak, oak_mono, realsense, zed, usb, or None."""
 
     ego_view_device_id: str | None = None
-    """Device ID for ego view camera (OAK MxID, RealSense serial, USB /dev/video index)."""
+    """Device ID (OAK MxID, ZED/RealSense serial, USB /dev/video index)."""
 
     head_camera: str | None = None
     """Camera type for head view."""
@@ -78,6 +78,18 @@ class ComposedCameraConfig:
 
     fps: int = 30
     """Publish rate.  OAK cameras run at 30 FPS; lower values add latency."""
+
+    zed_resolution: str = "HD720"
+    """ZED resolution: HD720, HD1080, HD2K or VGA."""
+
+    zed_view: str = "left"
+    """Rectified ZED eye to publish as RGB: left or right."""
+
+    zed_flip: bool = False
+    """Flip the ZED image (camera mounted upside down)."""
+
+    zed_output: str = "640x480"
+    """ZED output size WxH: centre-crop to this aspect then resize (the SONIC exporter/VLA expect 640x480). "0" = native."""
 
     run_as_server: bool = True
     """Run as ZMQ PUB server (set False for in-process usage)."""
@@ -371,6 +383,16 @@ class ComposedCameraSensor(Sensor, SensorServer):
                 oak_config.enable_mono_cameras = True
             print(f"Initializing OAK sensor for camera type: {camera_type}")
             return OAKSensor(config=oak_config, mount_position=mount_position, device_id=device_id)
+
+        elif camera_type == "zed":
+            from gear_sonic.camera.drivers.zed import ZEDConfig, ZEDSensor
+
+            return ZEDSensor(
+                config=ZEDConfig(resolution=self.config.zed_resolution, fps=self.config.fps,
+                                 view=self.config.zed_view, flip=self.config.zed_flip,
+                                 output=self.config.zed_output),
+                mount_position=mount_position, device_id=device_id,
+            )
 
         elif camera_type == "realsense":
             from gear_sonic.camera.drivers.realsense import RealSenseSensor

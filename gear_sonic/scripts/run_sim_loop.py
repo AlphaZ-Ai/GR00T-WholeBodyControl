@@ -8,7 +8,7 @@ from typing import Dict
 
 import tyro
 
-from gear_sonic.utils.mujoco_sim.simulator_factory import SimulatorFactory, init_channel
+from gear_sonic.utils.mujoco_sim.simulator_factory import SimulatorFactory
 from gear_sonic.utils.mujoco_sim.configs import SimLoopConfig
 from gear_sonic.data.robot_model.instantiation.g1 import (
     instantiate_g1_robot_model,
@@ -23,9 +23,8 @@ class SimWrapper:
         self.robot_model = robot_model
         self.config = config
 
-        init_channel(config=self.config)
-
-        # Create simulator using factory
+        # BaseSimulator initializes the DDS channel before creating its bridge.
+        # Creating the same domain twice can stall CycloneDDS initialization.
         self.sim = SimulatorFactory.create_simulator(
             config=self.config,
             env_name=env_name,

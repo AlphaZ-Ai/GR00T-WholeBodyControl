@@ -244,6 +244,13 @@ FetchContent_MakeAvailable(googletest)
 
 find_package(GTest REQUIRED)
 
+# Isolated hand tests do not depend on the unreleased FK motion fixture.
+add_executable(dex1_hands_test unit_tests/test_dex1.cpp)
+target_include_directories(dex1_hands_test PRIVATE ${EXE_INCLUDES})
+target_link_libraries(dex1_hands_test PRIVATE GTest::GTest GTest::Main g1_deploy)
+set_target_properties(dex1_hands_test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/target/release/")
+
 file(GLOB_RECURSE TEST_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/unit_tests/*.cpp)
 
 add_executable(run_tests ${TEST_SRCS})
